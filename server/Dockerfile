@@ -7,11 +7,12 @@ WORKDIR /app
 # Copy dependency files from repo root
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies only (no project install needed)
-RUN uv sync --frozen --no-install-project --no-dev
+# Export locked deps to requirements.txt then install into the system Python
+RUN uv export --frozen --no-dev --no-hashes -o /tmp/requirements.txt \
+    && uv pip install --system -r /tmp/requirements.txt
 
 COPY server/server.py .
 
 EXPOSE 5001
 
-CMD ["uv", "run", "gunicorn", "--bind", "0.0.0.0:5001", "--workers", "1", "--threads", "4", "server:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "1", "--threads", "4", "server:app"]
