@@ -1,0 +1,117 @@
+# esphome-frame — frame.yaml
+# ===========================
+# ESPHome config for Seeed EE04 (XIAO ESP32-S3 Plus) + 7.3" Spectra6 display.
+#
+# Copy this file for each frame and change the substitutions block only.
+# Secrets (wifi, API key, OTA password) live in secrets.yaml — see example.
+#
+# First flash: must be done over USB (see README).
+# All subsequent updates: OTA via Wi-Fi.
+
+substitutions:
+  # Unique name for this device (lowercase, hyphens ok, no spaces)
+  device_name: "eink-frame-1"
+
+  # Index passed to the server: /frame/0/current.png, /frame/1/current.png …
+  # Frame 0 shows the newest image; frame 1 shows the next in the pool, etc.
+  frame_index: "0"
+
+  # Server URL to fetch images from. The device will GET /frame/${frame_index}/current.png
+  server_url: "http://192.168.1.17:5001"
+
+  # setting for refresh time, Spectra6 takes ~30 s to update an image,
+  # so fetching more often than that just wastes battery.
+  # Format: Xs, Xmin, Xh  (e.g. "30min", "1h")
+  update_interval: "5min"
+
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${device_name}
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # ESP32-S3's Wi-Fi is 2.4GHz only
+  ap:
+    ssid: "${device_name} fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# pull in the epaper_spi component from ESPHome's main repo, which includes the GxEPD2 driver for the Spectra6
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome/
+      ref: 2025.10.5
+    components: [epaper_spi, display]
+
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+
+http_request:
+
+# online_image downloads the PNG into PSRAM and triggers a display update
+# image needs to be pre-dithered to the Spectra6's 6-colour palette
+
+online_image:
+  - id: frame_image
+    url: "${server_url}/frame/${frame_index}/current.png"
+    format: PNG
+    type: RGB
+    on_download_finished:
+      - component.update: eink_display
+    on_error:
+      - logger.log:
+          level: WARN
+          format: "Image download failed — will retry next interval"
+
+# configurable update interval — set at top of file
+interval:
+  - interval: ${update_interval}
+    then:
+      - component.update: frame_image
+
+display:
+  - platform: epaper_spi
+    id: eink_display
+    model: 7.3in-Spectra-E6
+    cs_pin: GPIO44
+    dc_pin:
+      number: GPIO10
+      inverted: false
+    busy_pin:
+      number: GPIO4
+      inverted: true   # BUSY is active-low on the Spectra6
+    reset_pin: GPIO38
+    rotation: 0°
+    # set to never due to online dependency; updates are triggered by the image download callback
+    update_interval: never
+    lambda: |-
+      it.image(0, 0, id(frame_image));

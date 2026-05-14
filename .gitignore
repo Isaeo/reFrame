@@ -1,0 +1,21 @@
+# Credentials — never commit these
+service_account.json
+.env
+frame/secrets.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+
+# ESPHome build artifacts
+frame/.esphome/
+
+# Claude Code
+.claude/
+
+# macOS
+.DS_Store

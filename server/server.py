@@ -1,0 +1,314 @@
+"""
+eink-frame — server.py
+======================
+Flask server that polls a shared Google Drive folder and serves
+processed images to ESPHome e-ink frames.
+
+Dependencies: requirements.txt
+Configuration: .env in the project root (see .env.example)
+"""
+
+import os
+import io
+import time
+import random
+import threading
+import logging
+from flask import Flask, request, jsonify, Response
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2 import service_account
+from PIL import Image
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# ── Config (all values come from .env via Docker or environment) ──────────────
+#
+#   FOLDER_ID        — Google Drive folder ID (last segment of the folder URL)
+#   REFRESH_SECONDS  — how often the server re-polls Drive (default 1800 = 30 min)
+#   SERVER_BASE_URL  — public URL of THIS server, no trailing slash
+#                      e.g. http://YOUR_ORACLE_IP:5000
+#   CREDS_FILE       — path to service_account.json inside the container
+#
+FOLDER_ID        = os.environ["FOLDER_ID"]                          # ← EDIT in .env
+REFRESH_SECONDS  = int(os.environ.get("REFRESH_SECONDS", "1800"))
+ROTATION_SECONDS = int(os.environ.get("ROTATION_SECONDS", "600"))  # how often to advance to next image
+POOL_SIZE        = int(os.environ.get("POOL_SIZE", "20"))           # max images kept in memory
+SERVER_BASE_URL  = os.environ["SERVER_BASE_URL"].rstrip("/")        # ← EDIT in .env
+CREDS_FILE       = os.environ.get("CREDS_FILE", "/app/service_account.json")
+
+DISPLAY_W, DISPLAY_H = 800, 480   # EE04 + 7.3" six-colour panel resolution
+
+# ── 6-colour e-ink palette ────────────────────────────────────────────────────
+# Matches the physical pigments on the Seeed 7.3" ACeP display:
+#   black, white, red, green, blue, yellow
+EINK_PALETTE_RGB = [
+    0,   0,   0,    # black
+    255, 255, 255,  # white
+    255, 0,   0,    # red
+    0,   255, 0,    # green
+    0,   0,   255,  # blue
+    255, 255, 0,    # yellow
+]
+# PIL palette buffer is always 256 colours × 3 channels
+_full_palette = EINK_PALETTE_RGB + [0] * (256 * 3 - len(EINK_PALETTE_RGB))
+
+# ── Shared state ──────────────────────────────────────────────────────────────
+image_pool:     list[bytes] = []   # processed PNG bytes, newest first
+pool_lock       = threading.Lock()
+last_fetch_time: float = 0.0
+
+
+# ── Google Drive helpers ──────────────────────────────────────────────────────
+
+def get_drive_service():
+    """Build an authenticated Drive v3 client from the service account file."""
+    creds = service_account.Credentials.from_service_account_file(
+        CREDS_FILE,
+        scopes=["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def list_drive_images(service) -> list[dict]:
+    """Return up to 10 image files from the Drive folder, newest first."""
+    result = service.files().list(
+        q=(
+            f"'{FOLDER_ID}' in parents"
+            " and trashed=false"
+            " and mimeType contains 'image/'"
+        ),
+        orderBy="modifiedTime desc",
+        pageSize=POOL_SIZE,
+        fields="files(id, name, mimeType, modifiedTime)",
+    ).execute()
+    return result.get("files", [])
+
+
+def download_file(service, file_id: str) -> bytes:
+    """Stream-download a Drive file and return its raw bytes."""
+    req = service.files().get_media(fileId=file_id)
+    buf = io.BytesIO()
+    dl  = MediaIoBaseDownload(buf, req)
+    done = False
+    while not done:
+        _, done = dl.next_chunk()
+    return buf.getvalue()
+
+
+# ── Image processing ──────────────────────────────────────────────────────────
+
+def process_image(raw: bytes) -> bytes:
+    """
+    1. Decode the raw image (JPEG, PNG, WebP, …).
+    2. Fit inside 800×480 preserving aspect ratio.
+    3. Letterbox onto a white canvas.
+    4. Quantise to the 6-colour e-ink palette with Floyd-Steinberg dithering.
+    5. Return as PNG bytes ready to serve.
+    """
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    img.thumbnail((DISPLAY_W, DISPLAY_H), Image.LANCZOS)
+
+    canvas = Image.new("RGB", (DISPLAY_W, DISPLAY_H), (255, 255, 255))
+    x = (DISPLAY_W - img.width)  // 2
+    y = (DISPLAY_H - img.height) // 2
+    canvas.paste(img, (x, y))
+
+    # Build a palette image and dither into it
+    palette_img = Image.new("P", (1, 1))
+    palette_img.putpalette(_full_palette)
+
+    dithered = canvas.quantize(
+        palette=palette_img,
+        dither=Image.Dither.FLOYDSTEINBERG,
+    )
+
+    out = io.BytesIO()
+    dithered.convert("RGB").save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+# ── Background polling loop ───────────────────────────────────────────────────
+
+def fetch_and_process():
+    """Poll Drive, process up to 5 images, update the shared pool."""
+    global last_fetch_time
+    log.info("Polling Google Drive folder %s …", FOLDER_ID)
+    try:
+        service = get_drive_service()
+        files   = list_drive_images(service)
+
+        if not files:
+            log.info("  No images found — nothing to update.")
+            return
+
+        pool = []
+        for f in files[:POOL_SIZE]:
+            try:
+                raw       = download_file(service, f["id"])
+                processed = process_image(raw)
+                pool.append(processed)
+                log.info("  ✓ %s", f["name"])
+            except Exception as exc:
+                log.warning("  ✗ %s  (%s)", f["name"], exc)
+
+        if pool:
+            with pool_lock:
+                image_pool.clear()
+                image_pool.extend(pool)
+            last_fetch_time = time.time()
+            log.info("Pool updated — %d image(s) ready.", len(pool))
+
+    except Exception as exc:
+        log.error("Drive poll failed: %s", exc)
+
+
+def poll_loop():
+    """Fetch immediately at startup, then sleep and repeat."""
+    fetch_and_process()
+    while True:
+        time.sleep(REFRESH_SECONDS)
+        fetch_and_process()
+
+
+# ── Image selection ───────────────────────────────────────────────────────────
+
+def current_image() -> bytes | None:
+    """Return the current image for all frames, rotating every ROTATION_SECONDS."""
+    with pool_lock:
+        if not image_pool:
+            return None
+        idx = int(time.time() / ROTATION_SECONDS) % len(image_pool)
+        return image_pool[idx]
+
+
+# ── TRMNL firmware API endpoints ──────────────────────────────────────────────
+#
+# The firmware calls exactly two endpoints:
+#   POST /api/setup   — first boot registration
+#   GET  /api/display — every wake cycle, asks "what should I show?"
+#
+# Everything else below supports those two calls.
+
+@app.route("/api/setup", methods=["POST"])
+def api_setup():
+    """
+    Called once when the device first connects to a custom server.
+    Returns a local api_key and friendly_id — the firmware stores these
+    and sends api_key in the Access-Token header on every subsequent call.
+    """
+    data = request.get_json(silent=True) or {}
+    mac  = data.get("id", request.headers.get("ID", "unknown"))
+    log.info("Device registered: %s", mac)
+    return jsonify({
+        "status":      0,
+        "api_key":     f"frame-{mac}",          # arbitrary — firmware just echoes it back
+        "friendly_id": mac.replace(":", "")[:8].upper(),
+        "image_url":   f"{SERVER_BASE_URL}/placeholder.png",
+        "message":     "Connected to trmnl-frame server.",
+    })
+
+
+@app.route("/api/display", methods=["GET"])
+def api_display():
+    """
+    Main polling endpoint.  The firmware wakes up, calls this, gets back a
+    JSON blob with image_url and refresh_rate, downloads the image, draws it,
+    then sleeps for refresh_rate seconds.
+    """
+    mac = request.headers.get("ID", "unknown").upper().replace(":", "")
+    img = current_image()
+
+    if img is None:
+        # Server just started — tell device to retry in 60 s
+        log.info("  [%s] Pool not ready, asking device to retry.", mac)
+        return jsonify({
+            "status":          202,
+            "image_url":       f"{SERVER_BASE_URL}/placeholder.png",
+            "filename":        "warming-up",
+            "refresh_rate":    "60",
+            "update_firmware": False,
+            "firmware_url":    None,
+            "reset_firmware":  False,
+        })
+
+    log.info("  [%s] Serving image slot.", mac)
+    return jsonify({
+        "status":          0,
+        "image_url":       f"{SERVER_BASE_URL}/image/{mac}.png",
+        "filename":        f"frame-{mac[:6]}",
+        "refresh_rate":    str(REFRESH_SECONDS),
+        "update_firmware": False,
+        "firmware_url":    None,
+        "reset_firmware":  False,
+    })
+
+
+@app.route("/image/<mac>.png")
+def serve_image(mac):
+    """Serve the processed PNG for a specific device."""
+    img = current_image()
+    if img is None:
+        return "Image not ready yet", 503
+    return Response(img, mimetype="image/png")
+
+
+@app.route("/frame/<int:index>/current.png")
+def serve_frame(index):
+    """Serve the current image to all frames — used by the ESPHome online_image component."""
+    img = current_image()
+    if img is None:
+        return "Image not ready yet", 503
+    return Response(img, mimetype="image/png")
+
+
+@app.route("/placeholder.png")
+def serve_placeholder():
+    """Blank white image returned while the pool is warming up."""
+    buf = io.BytesIO()
+    Image.new("RGB", (DISPLAY_W, DISPLAY_H), (255, 255, 255)).save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png")
+
+
+@app.route("/health")
+def health():
+    """Simple health-check — useful for monitoring and debugging."""
+    return jsonify({
+        "ok":              True,
+        "pool_size":       len(image_pool),
+        "pool_max":        POOL_SIZE,
+        "last_fetch":      last_fetch_time,
+        "next_fetch_in":   max(0, int(REFRESH_SECONDS - (time.time() - last_fetch_time))),
+        "folder_id":       FOLDER_ID,
+        "refresh_every":   REFRESH_SECONDS,
+        "rotation_every":  ROTATION_SECONDS,
+    })
+
+
+@app.route("/refresh", methods=["POST"])
+def manual_refresh():
+    """Trigger an immediate Drive poll without restarting the server."""
+    threading.Thread(target=fetch_and_process, daemon=True).start()
+    return jsonify({"ok": True, "message": "Drive poll started."})
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    log.info("Starting trmnl-frame server — %s", SERVER_BASE_URL)
+    log.info("Drive folder: %s", FOLDER_ID)
+    log.info("Refresh interval: %d s", REFRESH_SECONDS)
+
+    poller = threading.Thread(target=poll_loop, daemon=True)
+    poller.start()
+
+    # host=0.0.0.0 is required so Docker exposes the port correctly
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5001)), threaded=True)

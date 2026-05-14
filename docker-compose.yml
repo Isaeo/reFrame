@@ -1,0 +1,39 @@
+# ── docker-compose.yml ────────────────────────────────────────────────────────
+#
+# Before starting:
+#   1. Copy .env.example → .env and fill in your values.
+#   2. Place service_account.json in the same directory as this file.
+#
+# Start:   docker compose up -d --build
+# Logs:    docker compose logs -f
+# Stop:    docker compose down
+# Refresh: curl -X POST http://localhost:5001/refresh
+
+services:
+  frame-server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+
+    ports:
+      - "5001:5001"
+
+    env_file:
+      - .env
+
+    environment:
+      # Override CREDS_FILE to the container path — don't change this.
+      CREDS_FILE: /app/service_account.json
+
+    volumes:
+      # service_account.json is mounted read-only — never baked into the image.
+      - ./service_account.json:/app/service_account.json:ro
+
+    restart: always
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
