@@ -9,4 +9,4 @@ COPY server/server.py .
 
 EXPOSE 5001
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "1", "--threads", "4", "server:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5001", "--workers", "1", "--threads", "4", "--log-level", "info", "--access-logfile", "-", "--error-logfile", "-", "server:app"]

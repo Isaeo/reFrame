@@ -17,7 +17,7 @@ substitutions:
   frame_index: "0"
 
   # Server URL to fetch images from. The device will GET /frame/${frame_index}/current.png
-  server_url: "http://192.168.1.17:5001"
+  server_url: "http://158.178.244.140:5001"
 
   # setting for refresh time, Spectra6 takes ~30 s to update an image,
   # so fetching more often than that just wastes battery.
