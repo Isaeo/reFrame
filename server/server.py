@@ -66,6 +66,7 @@ image_pool:     list[bytes] = []   # processed PNG bytes, newest first
 pool_lock       = threading.Lock()
 last_fetch_time: float = 0.0
 manual_offset:  int = 0            # incremented by /next to manually advance images
+last_top_id:    str = ""           # Drive file ID of the most recent image in the pool
 
 
 # ── Google Drive helpers ──────────────────────────────────────────────────────
@@ -162,9 +163,15 @@ def fetch_and_process():
                 log.warning("  ✗ %s  (%s)", f["name"], exc)
 
         if pool:
+            new_top_id = files[0]["id"]
             with pool_lock:
+                global manual_offset, last_top_id
                 image_pool.clear()
                 image_pool.extend(pool)
+                if new_top_id != last_top_id:
+                    manual_offset = 0
+                    last_top_id = new_top_id
+                    log.info("New image detected — resetting to top of queue.")
             last_fetch_time = time.time()
             log.info("Pool updated — %d image(s) ready.", len(pool))
 
