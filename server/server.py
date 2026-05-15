@@ -322,13 +322,11 @@ def next_image():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+# ── Start polling thread ──────────────────────────────────────────────────────
+# Runs at import time so the poller starts whether invoked via gunicorn or directly.
+log.info("Starting Drive poller — folder: %s  refresh: %ds", FOLDER_ID, REFRESH_SECONDS)
+threading.Thread(target=poll_loop, daemon=True).start()
+
+
 if __name__ == "__main__":
-    log.info("Starting trmnl-frame server — %s", SERVER_BASE_URL)
-    log.info("Drive folder: %s", FOLDER_ID)
-    log.info("Refresh interval: %d s", REFRESH_SECONDS)
-
-    poller = threading.Thread(target=poll_loop, daemon=True)
-    poller.start()
-
-    # host=0.0.0.0 is required so Docker exposes the port correctly
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5001)), threaded=True)
