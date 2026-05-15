@@ -49,6 +49,8 @@ wifi:
   ap:
     ssid: "${device_name} fallback"
     password: !secret ap_password
+  on_connect:
+    - component.update: frame_image
 
 captive_portal:
 
@@ -92,11 +94,32 @@ online_image:
           level: WARN
           format: "Image download failed — will retry next interval"
 
-# configurable update interval — set at top of file
+# ── Boot button — manual image advance ───────────────────────────────────────
+# Press the BOOT button on the XIAO ESP32-S3 to skip to the next image.
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    name: "Next Image"
+    on_press:
+      - http_request.post:
+          url: "${server_url}/next"
+      - component.update: frame_image
+
+# configurable update interval — only poll when wifi is connected
 interval:
   - interval: ${update_interval}
     then:
-      - component.update: frame_image
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - component.update: frame_image
 
 display:
   - platform: epaper_spi

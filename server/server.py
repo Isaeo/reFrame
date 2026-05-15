@@ -65,6 +65,7 @@ _full_palette = EINK_PALETTE_RGB + [0] * (256 * 3 - len(EINK_PALETTE_RGB))
 image_pool:     list[bytes] = []   # processed PNG bytes, newest first
 pool_lock       = threading.Lock()
 last_fetch_time: float = 0.0
+manual_offset:  int = 0            # incremented by /next to manually advance images
 
 
 # ── Google Drive helpers ──────────────────────────────────────────────────────
@@ -186,7 +187,7 @@ def current_image() -> bytes | None:
     with pool_lock:
         if not image_pool:
             return None
-        idx = int(time.time() / ROTATION_SECONDS) % len(image_pool)
+        idx = (int(time.time() / ROTATION_SECONDS) + manual_offset) % len(image_pool)
         return image_pool[idx]
 
 
@@ -298,6 +299,18 @@ def manual_refresh():
     """Trigger an immediate Drive poll without restarting the server."""
     threading.Thread(target=fetch_and_process, daemon=True).start()
     return jsonify({"ok": True, "message": "Drive poll started."})
+
+
+@app.route("/next", methods=["POST"])
+def next_image():
+    """Advance all frames to the next image immediately."""
+    global manual_offset
+    with pool_lock:
+        if not image_pool:
+            return jsonify({"ok": False, "message": "Pool is empty."}), 503
+        manual_offset = (manual_offset + 1) % len(image_pool)
+    log.info("Manual advance — now at offset %d", manual_offset)
+    return jsonify({"ok": True, "offset": manual_offset})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

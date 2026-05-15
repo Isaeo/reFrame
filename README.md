@@ -136,6 +136,7 @@ Subsequent updates are OTA over wifi.
 |---|---|---|
 | `GET` | `/health` | Server status — pool size, last fetch time, config |
 | `POST` | `/refresh` | Trigger an immediate Google Drive poll without restarting |
+| `POST` | `/next` | Advance all frames to the next image immediately |
 | `GET` | `/frame/<n>/current.png` | Current image for frame index `n` — called by ESPHome |
 | `GET` | `/image/<mac>.png` | Current image keyed by device MAC (TRMNL firmware compat) |
 | `GET` | `/placeholder.png` | Blank white 800×480 image served while pool is warming up |
