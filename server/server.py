@@ -65,20 +65,6 @@ EINK_PALETTE_RGB = [
 # PIL palette buffer is always 256 colours × 3 channels
 _full_palette = EINK_PALETTE_RGB + [0] * (256 * 3 - len(EINK_PALETTE_RGB))
 
-# ── Bayer ordered dither matrix ───────────────────────────────────────────────
-# 8×8 Bayer matrix gives 64 threshold levels — finer dot pattern than 4×4.
-# Produces a regular grid that better approximates how ACeP displays render,
-# avoids the directional streaks of Floyd-Steinberg, and eliminates bloom.
-_BAYER_8x8 = np.array([
-    [ 0, 32,  8, 40,  2, 34, 10, 42],
-    [48, 16, 56, 24, 50, 18, 58, 26],
-    [12, 44,  4, 36, 14, 46,  6, 38],
-    [60, 28, 52, 20, 62, 30, 54, 22],
-    [ 3, 35, 11, 43,  1, 33,  9, 41],
-    [51, 19, 59, 27, 49, 17, 57, 25],
-    [15, 47,  7, 39, 13, 45,  5, 37],
-    [63, 31, 55, 23, 61, 29, 53, 21],
-], dtype=np.float32) / 64.0  # normalise to 0–1
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 image_pool:     list[bytes] = []   # processed PNG bytes, newest first
@@ -129,49 +115,84 @@ def download_file(service, file_id: str) -> bytes:
 
 def process_image(raw: bytes) -> bytes:
     """
-    1. Decode the raw image (JPEG, PNG, WebP, HEIC, …).
-    2. Fit inside 800×480 preserving aspect ratio.
-    3. Letterbox onto a white canvas.
-    4. Light Gaussian blur to suppress lens flare lines and high-freq noise.
-    5. Bayer ordered dithering to the 6-colour palette — produces a regular
-       dot pattern that avoids Floyd-Steinberg's directional streaks and bloom.
-    6. Return as PNG bytes ready to serve.
+    Full pipeline for converting a source photo to a 6-colour ACeP e-ink PNG.
+
+    Steps:
+      1. Decode (JPEG / PNG / WebP / HEIC) and LANCZOS-resize to fit 800×480.
+      2. Letterbox onto a white 800×480 canvas.
+      3. Horizontal directional blur (7×1 kernel) to dissolve thin vertical
+         lens-flare streaks without muddying horizontal edges.
+      4. Saturation ×1.3 and contrast ×1.1 to compensate for the muted pigment
+         profile of the physical ACeP panel.
+      5. Floyd-Steinberg quantisation to the 6-colour palette.
+      6. Post-quantisation minority-pixel cleanup: any isolated palette pixel
+         that is horizontally surrounded by a single different colour is snapped
+         to that neighbour, eliminating residual single-pixel streak fragments.
+      7. Export as an optimised PNG and return the raw bytes.
     """
+    # ── 1. Decode & resize ────────────────────────────────────────────────────
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail((DISPLAY_W, DISPLAY_H), Image.LANCZOS)
 
+    # ── 2. Letterbox ──────────────────────────────────────────────────────────
     canvas = Image.new("RGB", (DISPLAY_W, DISPLAY_H), (255, 255, 255))
     x = (DISPLAY_W - img.width)  // 2
     y = (DISPLAY_H - img.height) // 2
     canvas.paste(img, (x, y))
 
-    # Suppress high-frequency artifacts (lens flares, sensor noise)
-    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=0.8))
+    # ── 3. Horizontal directional blur ────────────────────────────────────────
+    # A 7×1 horizontal kernel smooths thin vertical streaks (lens flares run
+    # top-to-bottom, so they have a narrow horizontal extent). Vertical edges
+    # and horizontal structure are preserved because the blur is 1 pixel tall.
+    h_blur_kernel = ImageFilter.Kernel(
+        size=(7, 1),
+        kernel=[1, 1, 1, 1, 1, 1, 1],
+        scale=7,
+        offset=0,
+    )
+    canvas = canvas.filter(h_blur_kernel)
 
-    # Grey world white balance — scales each channel so R/G/B means equalise,
-    # removing colour casts from the source image automatically
-    arr = np.array(canvas, dtype=np.float32)
-    means = arr.mean(axis=(0, 1))          # mean R, G, B
-    grey  = means.mean()                   # target luminance
-    scale = np.where(means > 0, grey / means, 1.0)
-    arr   = np.clip(arr * scale, 0, 255)
+    # ── 4. Perceptual boost ───────────────────────────────────────────────────
+    # ACeP pigments are physically muted vs. sRGB — boosting saturation and
+    # contrast before dithering recovers perceived vividness on the panel.
+    from PIL import ImageEnhance
+    canvas = ImageEnhance.Color(canvas).enhance(1.3)    # saturation
+    canvas = ImageEnhance.Contrast(canvas).enhance(1.1) # contrast
 
-    # Bayer ordered dither
-    h, w = arr.shape[:2]
-    bayer = np.tile(_BAYER_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
-    arr = np.clip(arr + (bayer[:, :, np.newaxis] - 0.5) * 96, 0, 255)
-    canvas = Image.fromarray(arr.astype(np.uint8))
-
+    # ── 5. Floyd-Steinberg quantisation ───────────────────────────────────────
     palette_img = Image.new("P", (1, 1))
     palette_img.putpalette(_full_palette)
 
     dithered = canvas.quantize(
         palette=palette_img,
-        dither=Image.Dither.NONE,  # Bayer noise already applied above
+        dither=Image.Dither.FLOYDSTEINBERG,
     )
 
+    # ── 6. Post-quantisation minority-pixel cleanup ───────────────────────────
+    # Convert to a 2-D array of palette indices (uint8, values 0-5).
+    # For every interior pixel, check its left and right neighbours: if both
+    # agree and differ from the centre, the centre is an isolated fragment —
+    # snap it to the neighbour value. One pass is sufficient for single-pixel
+    # streak remnants.
+    idx = np.array(dithered, dtype=np.uint8)  # shape: (H, W)
+
+    left   = idx[:, :-2]   # columns 0 … W-3
+    centre = idx[:, 1:-1]  # columns 1 … W-2
+    right  = idx[:, 2:]    # columns 2 … W-1
+
+    # Mask: neighbours agree with each other but not with centre
+    isolated = (left == right) & (left != centre)
+    # Build cleaned array: replace isolated pixels with left/right value
+    cleaned = idx.copy()
+    cleaned[:, 1:-1] = np.where(isolated, left, centre)
+
+    # Reconstruct a palette-mode image from the cleaned index array
+    result = Image.fromarray(cleaned, mode="P")
+    result.putpalette(_full_palette)
+
+    # ── 7. Export ─────────────────────────────────────────────────────────────
     out = io.BytesIO()
-    dithered.convert("RGB").save(out, format="PNG", optimize=True)
+    result.convert("RGB").save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
