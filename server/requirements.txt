@@ -47,6 +47,8 @@ markupsafe==3.0.3
     #   flask
     #   jinja2
     #   werkzeug
+numpy==2.4.5
+    # via reframe
 packaging==26.2
     # via gunicorn
 pillow==12.2.0

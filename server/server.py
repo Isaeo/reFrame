@@ -18,7 +18,8 @@ from flask import Flask, request, jsonify, Response
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
-from PIL import Image
+import numpy as np
+from PIL import Image, ImageFilter
 import pillow_heif
 pillow_heif.register_heif_opener()  # adds HEIC/HEIF support to Pillow
 
@@ -63,6 +64,21 @@ EINK_PALETTE_RGB = [
 ]
 # PIL palette buffer is always 256 colours × 3 channels
 _full_palette = EINK_PALETTE_RGB + [0] * (256 * 3 - len(EINK_PALETTE_RGB))
+
+# ── Bayer ordered dither matrix ───────────────────────────────────────────────
+# 8×8 Bayer matrix gives 64 threshold levels — finer dot pattern than 4×4.
+# Produces a regular grid that better approximates how ACeP displays render,
+# avoids the directional streaks of Floyd-Steinberg, and eliminates bloom.
+_BAYER_8x8 = np.array([
+    [ 0, 32,  8, 40,  2, 34, 10, 42],
+    [48, 16, 56, 24, 50, 18, 58, 26],
+    [12, 44,  4, 36, 14, 46,  6, 38],
+    [60, 28, 52, 20, 62, 30, 54, 22],
+    [ 3, 35, 11, 43,  1, 33,  9, 41],
+    [51, 19, 59, 27, 49, 17, 57, 25],
+    [15, 47,  7, 39, 13, 45,  5, 37],
+    [63, 31, 55, 23, 61, 29, 53, 21],
+], dtype=np.float32) / 64.0  # normalise to 0–1
 
 # ── Shared state ──────────────────────────────────────────────────────────────
 image_pool:     list[bytes] = []   # processed PNG bytes, newest first
@@ -113,11 +129,13 @@ def download_file(service, file_id: str) -> bytes:
 
 def process_image(raw: bytes) -> bytes:
     """
-    1. Decode the raw image (JPEG, PNG, WebP, …).
+    1. Decode the raw image (JPEG, PNG, WebP, HEIC, …).
     2. Fit inside 800×480 preserving aspect ratio.
     3. Letterbox onto a white canvas.
-    4. Quantise to the 6-colour e-ink palette with Floyd-Steinberg dithering.
-    5. Return as PNG bytes ready to serve.
+    4. Light Gaussian blur to suppress lens flare lines and high-freq noise.
+    5. Bayer ordered dithering to the 6-colour palette — produces a regular
+       dot pattern that avoids Floyd-Steinberg's directional streaks and bloom.
+    6. Return as PNG bytes ready to serve.
     """
     img = Image.open(io.BytesIO(raw)).convert("RGB")
     img.thumbnail((DISPLAY_W, DISPLAY_H), Image.LANCZOS)
@@ -127,13 +145,24 @@ def process_image(raw: bytes) -> bytes:
     y = (DISPLAY_H - img.height) // 2
     canvas.paste(img, (x, y))
 
-    # Build a palette image and dither into it
+    # Suppress high-frequency artifacts (lens flares, sensor noise)
+    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=0.8))
+
+    # Bayer ordered dither — tile the 8×8 matrix to fill the canvas,
+    # add structured noise, then snap each pixel to the nearest palette colour
+    arr = np.array(canvas, dtype=np.float32)
+    h, w = arr.shape[:2]
+    bayer = np.tile(_BAYER_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
+    # ±30 range gives good dot density without over-dithering
+    arr = np.clip(arr + (bayer[:, :, np.newaxis] - 0.5) * 60, 0, 255)
+    canvas = Image.fromarray(arr.astype(np.uint8))
+
     palette_img = Image.new("P", (1, 1))
     palette_img.putpalette(_full_palette)
 
     dithered = canvas.quantize(
         palette=palette_img,
-        dither=Image.Dither.FLOYDSTEINBERG,
+        dither=Image.Dither.NONE,  # Bayer noise already applied above
     )
 
     out = io.BytesIO()
