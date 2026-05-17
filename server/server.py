@@ -48,7 +48,7 @@ POOL_SIZE        = int(os.environ.get("POOL_SIZE", "20"))           # max images
 SERVER_BASE_URL  = os.environ["SERVER_BASE_URL"].rstrip("/")        # ← EDIT in .env
 CREDS_FILE       = os.environ.get("CREDS_FILE", "/app/service_account.json")
 SATURATION       = float(os.environ.get("SATURATION", "1.5"))       # 1.0 = unchanged, >1 = more vivid
-CONTRAST         = float(os.environ.get("CONTRAST",   "0.9"))       # 1.0 = unchanged, >1 = more contrast
+CONTRAST         = float(os.environ.get("CONTRAST",   "1.2"))       # 1.0 = unchanged, >1 = more contrast
 
 DISPLAY_W, DISPLAY_H = 800, 480   # EE04 + 7.3" six-colour panel resolution
 
