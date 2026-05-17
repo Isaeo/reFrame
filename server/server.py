@@ -148,12 +148,17 @@ def process_image(raw: bytes) -> bytes:
     # Suppress high-frequency artifacts (lens flares, sensor noise)
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=0.8))
 
-    # Bayer ordered dither — tile the 8×8 matrix to fill the canvas,
-    # add structured noise, then snap each pixel to the nearest palette colour
+    # Grey world white balance — scales each channel so R/G/B means equalise,
+    # removing colour casts from the source image automatically
     arr = np.array(canvas, dtype=np.float32)
+    means = arr.mean(axis=(0, 1))          # mean R, G, B
+    grey  = means.mean()                   # target luminance
+    scale = np.where(means > 0, grey / means, 1.0)
+    arr   = np.clip(arr * scale, 0, 255)
+
+    # Bayer ordered dither
     h, w = arr.shape[:2]
     bayer = np.tile(_BAYER_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
-    # ±12 range — subtle dithering, preserves natural colours
     arr = np.clip(arr + (bayer[:, :, np.newaxis] - 0.5) * 128, 0, 255)
     canvas = Image.fromarray(arr.astype(np.uint8))
 
