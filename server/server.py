@@ -19,7 +19,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageEnhance
 import pillow_heif
 pillow_heif.register_heif_opener()  # adds HEIC/HEIF support to Pillow
 
@@ -141,21 +141,25 @@ def process_image(raw: bytes) -> bytes:
     canvas.paste(img, (x, y))
 
     # ── 3. Horizontal directional blur ────────────────────────────────────────
-    # A 7×1 horizontal kernel smooths thin vertical streaks (lens flares run
-    # top-to-bottom, so they have a narrow horizontal extent). Vertical edges
-    # and horizontal structure are preserved because the blur is 1 pixel tall.
-    h_blur_kernel = ImageFilter.Kernel(
-        size=(7, 1),
-        kernel=[1, 1, 1, 1, 1, 1, 1],
-        scale=7,
-        offset=0,
+    # A 7-pixel horizontal box blur smooths thin vertical streaks (lens flares
+    # run top-to-bottom so they have a narrow horizontal extent). Vertical
+    # edges and horizontal structure are preserved because blur is 1 pixel tall.
+    # PIL's Kernel filter only supports square kernels, so we use a numpy
+    # cumulative-sum box blur applied along axis=1 (width) only.
+    k = 7
+    arr = np.array(canvas, dtype=np.float32)                  # (H, W, 3)
+    padded = np.pad(arr, ((0, 0), (k // 2, k // 2), (0, 0)), mode="edge")
+    cs = np.cumsum(padded, axis=1)
+    # Prepend a zero column so the sliding-window difference is clean
+    cs = np.concatenate(
+        [np.zeros((arr.shape[0], 1, 3), dtype=np.float32), cs], axis=1
     )
-    canvas = canvas.filter(h_blur_kernel)
+    blurred = (cs[:, k:, :] - cs[:, :-k, :]) / k             # (H, W, 3)
+    canvas = Image.fromarray(blurred.clip(0, 255).astype(np.uint8))
 
     # ── 4. Perceptual boost ───────────────────────────────────────────────────
     # ACeP pigments are physically muted vs. sRGB — boosting saturation and
     # contrast before dithering recovers perceived vividness on the panel.
-    from PIL import ImageEnhance
     canvas = ImageEnhance.Color(canvas).enhance(1.3)    # saturation
     canvas = ImageEnhance.Contrast(canvas).enhance(1.1) # contrast
 
