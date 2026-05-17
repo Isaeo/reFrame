@@ -154,7 +154,7 @@ def process_image(raw: bytes) -> bytes:
     h, w = arr.shape[:2]
     bayer = np.tile(_BAYER_8x8, (h // 8 + 1, w // 8 + 1))[:h, :w]
     # ±12 range — subtle dithering, preserves natural colours
-    arr = np.clip(arr + (bayer[:, :, np.newaxis] - 0.5) * 8, 0, 255)
+    arr = np.clip(arr + (bayer[:, :, np.newaxis] - 0.5) * 128, 0, 255)
     canvas = Image.fromarray(arr.astype(np.uint8))
 
     palette_img = Image.new("P", (1, 1))
