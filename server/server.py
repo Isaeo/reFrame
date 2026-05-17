@@ -145,7 +145,7 @@ def process_image(raw: bytes) -> bytes:
     # edges and horizontal structure are preserved because blur is 1 pixel tall.
     # PIL's Kernel filter only supports square kernels, so we use a numpy
     # cumulative-sum box blur applied along axis=1 (width) only.
-    k = 3
+    k = 5
     arr = np.array(canvas, dtype=np.float32)                  # (H, W, 3)
     padded = np.pad(arr, ((0, 0), (k // 2, k // 2), (0, 0)), mode="edge")
     cs = np.cumsum(padded, axis=1)
