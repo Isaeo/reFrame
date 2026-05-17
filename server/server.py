@@ -47,6 +47,8 @@ ROTATION_SECONDS = int(os.environ.get("ROTATION_SECONDS", "600"))  # how often t
 POOL_SIZE        = int(os.environ.get("POOL_SIZE", "20"))           # max images kept in memory
 SERVER_BASE_URL  = os.environ["SERVER_BASE_URL"].rstrip("/")        # ← EDIT in .env
 CREDS_FILE       = os.environ.get("CREDS_FILE", "/app/service_account.json")
+SATURATION       = float(os.environ.get("SATURATION", "1.5"))       # 1.0 = unchanged, >1 = more vivid
+CONTRAST         = float(os.environ.get("CONTRAST",   "0.9"))       # 1.0 = unchanged, >1 = more contrast
 
 DISPLAY_W, DISPLAY_H = 800, 480   # EE04 + 7.3" six-colour panel resolution
 
@@ -120,15 +122,12 @@ def process_image(raw: bytes) -> bytes:
     Steps:
       1. Decode (JPEG / PNG / WebP / HEIC) and LANCZOS-resize to fit 800×480.
       2. Letterbox onto a white 800×480 canvas.
-      3. Horizontal directional blur (7×1 kernel) to dissolve thin vertical
-         lens-flare streaks without muddying horizontal edges.
-      4. Saturation ×1.3 and contrast ×1.1 to compensate for the muted pigment
-         profile of the physical ACeP panel.
+      3. Horizontal 3-pixel box blur to soften thin vertical streak artifacts
+         without affecting horizontal structure (numpy cumsum, axis=1 only).
+      4. Saturation and contrast boost to compensate for muted ACeP pigments.
+         Tunable via SATURATION / CONTRAST env vars (default 1.3 / 1.1).
       5. Floyd-Steinberg quantisation to the 6-colour palette.
-      6. Post-quantisation minority-pixel cleanup: any isolated palette pixel
-         that is horizontally surrounded by a single different colour is snapped
-         to that neighbour, eliminating residual single-pixel streak fragments.
-      7. Export as an optimised PNG and return the raw bytes.
+      6. Export as an optimised PNG and return the raw bytes.
     """
     # ── 1. Decode & resize ────────────────────────────────────────────────────
     img = Image.open(io.BytesIO(raw)).convert("RGB")
@@ -160,8 +159,9 @@ def process_image(raw: bytes) -> bytes:
     # ── 4. Perceptual boost ───────────────────────────────────────────────────
     # ACeP pigments are physically muted vs. sRGB — boosting saturation and
     # contrast before dithering recovers perceived vividness on the panel.
-    canvas = ImageEnhance.Color(canvas).enhance(1.3)    # saturation
-    canvas = ImageEnhance.Contrast(canvas).enhance(1.1) # contrast
+    # Tune via SATURATION / CONTRAST env vars (1.0 = no change).
+    canvas = ImageEnhance.Color(canvas).enhance(SATURATION)
+    canvas = ImageEnhance.Contrast(canvas).enhance(CONTRAST)
 
     # ── 5. Floyd-Steinberg quantisation ───────────────────────────────────────
     palette_img = Image.new("P", (1, 1))
@@ -172,31 +172,9 @@ def process_image(raw: bytes) -> bytes:
         dither=Image.Dither.FLOYDSTEINBERG,
     )
 
-    # ── 6. Post-quantisation minority-pixel cleanup ───────────────────────────
-    # Convert to a 2-D array of palette indices (uint8, values 0-5).
-    # For every interior pixel, check its left and right neighbours: if both
-    # agree and differ from the centre, the centre is an isolated fragment —
-    # snap it to the neighbour value. One pass is sufficient for single-pixel
-    # streak remnants.
-    idx = np.array(dithered, dtype=np.uint8)  # shape: (H, W)
-
-    left   = idx[:, :-2]   # columns 0 … W-3
-    centre = idx[:, 1:-1]  # columns 1 … W-2
-    right  = idx[:, 2:]    # columns 2 … W-1
-
-    # Mask: neighbours agree with each other but not with centre
-    isolated = (left == right) & (left != centre)
-    # Build cleaned array: replace isolated pixels with left/right value
-    cleaned = idx.copy()
-    cleaned[:, 1:-1] = np.where(isolated, left, centre)
-
-    # Reconstruct a palette-mode image from the cleaned index array
-    result = Image.fromarray(cleaned, mode="P")
-    result.putpalette(_full_palette)
-
-    # ── 7. Export ─────────────────────────────────────────────────────────────
+    # ── 6. Export ─────────────────────────────────────────────────────────────
     out = io.BytesIO()
-    result.convert("RGB").save(out, format="PNG", optimize=True)
+    dithered.convert("RGB").save(out, format="PNG", optimize=True)
     return out.getvalue()
 
 
