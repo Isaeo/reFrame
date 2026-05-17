@@ -1,0 +1,86 @@
+# test_frame.yaml
+# ================
+# Renders a 6-colour test pattern on the Spectra6 display.
+# Flash this once to verify all 6 pigments and visually calibrate the
+# palette values in server/server.py.
+#
+# Layout (800×480):
+#   ┌──────────┬──────────┬──────────┐
+#   │  BLACK   │  WHITE   │   RED    │
+#   ├──────────┼──────────┼──────────┤
+#   │  GREEN   │   BLUE   │  YELLOW  │
+#   └──────────┴──────────┴──────────┘
+#
+# Flash:  esphome run frame/test_frame.yaml
+# After:  esphome run frame/frame.yaml  (to return to normal)
+
+substitutions:
+  device_name: "eink-frame-test"
+
+esphome:
+  name: ${device_name}
+  on_boot:
+    priority: -100
+    then:
+      - component.update: eink_display
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name} fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+external_components:
+  - source:
+      type: git
+      url: https://github.com/esphome/esphome/
+      ref: 2025.10.5
+    components: [epaper_spi, display]
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO9
+
+display:
+  - platform: epaper_spi
+    id: eink_display
+    model: 7.3in-Spectra-E6
+    cs_pin: GPIO44
+    dc_pin:
+      number: GPIO10
+      inverted: false
+    busy_pin:
+      number: GPIO4
+      inverted: true
+    reset_pin: GPIO38
+    rotation: 0°
+    update_interval: never
+    lambda: |-
+      int bw = 800 / 3;
+      int bh = 480 / 2;
+
+      it.filled_rectangle(0,     0,   bw, bh, Color(0,   0,   0  ));  // black
+      it.filled_rectangle(bw,    0,   bw, bh, Color(255, 255, 255));  // white
+      it.filled_rectangle(bw*2,  0,   bw, bh, Color(255, 0,   0  ));  // red
+      it.filled_rectangle(0,     bh,  bw, bh, Color(0,   255, 0  ));  // green
+      it.filled_rectangle(bw,    bh,  bw, bh, Color(0,   0,   255));  // blue
+      it.filled_rectangle(bw*2,  bh,  bw, bh, Color(255, 255, 0  ));  // yellow
