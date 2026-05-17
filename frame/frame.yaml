@@ -19,9 +19,9 @@ substitutions:
   # Server URL to fetch images from. The device will GET /frame/${frame_index}/current.png
   server_url: "http://158.178.244.140:5001"
 
-  # setting for refresh time, Spectra6 takes ~30 s to update an image,
-  # so fetching more often than that just wastes battery.
-  # Format: Xs, Xmin, Xh  (e.g. "30min", "1h")
+  # How often to check for a new image tag. The display only refreshes if the tag changed.
+  # Spectra6 takes ~30s to refresh so there's no point checking more often than that.
+  # Format: Xs, Xmin, Xh  (e.g. "1min", "5min", "1h")
   update_interval: "1min"
 
 
@@ -41,6 +41,12 @@ psram:
 logger:
   level: INFO
 
+# ── Stores the last seen image tag so we can skip unchanged images ─────────────
+globals:
+  - id: last_image_tag
+    type: std::string
+    restore_value: false
+    initial_value: '""'
 
 wifi:
   ssid: !secret wifi_ssid
@@ -50,8 +56,7 @@ wifi:
     ssid: "${device_name} fallback"
     password: !secret ap_password
   on_connect:
-    - online_image.release: frame_image
-    - component.update: frame_image
+    - script.execute: check_and_refresh
 
 captive_portal:
 
@@ -63,8 +68,7 @@ ota:
   - platform: esphome
     password: !secret ota_password
 
-# pull in the epaper_spi component from ESPHome's main repo, which includes the GxEPD2 driver for the Spectra6
-
+# pull in the epaper_spi component from ESPHome's main repo
 external_components:
   - source:
       type: git
@@ -72,17 +76,14 @@ external_components:
       ref: 2025.10.5
     components: [epaper_spi, display]
 
-
 spi:
   clk_pin: GPIO7
   mosi_pin: GPIO9
-
 
 http_request:
 
 # online_image downloads the PNG into PSRAM and triggers a display update
 # image needs to be pre-dithered to the Spectra6's 6-colour palette
-
 online_image:
   - id: frame_image
     url: "${server_url}/frame/${frame_index}/current.png"
@@ -95,12 +96,32 @@ online_image:
           level: WARN
           format: "Image download failed — retrying in 30s"
       - delay: 30s
-      - online_image.release: frame_image
-      - component.update: frame_image
+      - script.execute: check_and_refresh
+
+# ── Tag check script ──────────────────────────────────────────────────────────
+# Fetches a lightweight tag from the server. Only downloads and refreshes the
+# display if the tag has changed since the last check.
+
+script:
+  - id: check_and_refresh
+    then:
+      - http_request.get:
+          url: "${server_url}/frame/${frame_index}/tag"
+          capture_response: true
+          on_response:
+            then:
+              - lambda: |-
+                  if (body != id(last_image_tag)) {
+                    ESP_LOGI("frame", "Image tag changed: %s -> %s", id(last_image_tag).c_str(), body.c_str());
+                    id(last_image_tag) = body;
+                    id(frame_image).release();
+                    id(frame_image).update();
+                  } else {
+                    ESP_LOGI("frame", "Image unchanged, skipping refresh");
+                  }
 
 # ── Boot button — manual image advance ───────────────────────────────────────
 # Press the BOOT button on the XIAO ESP32-S3 to skip to the next image.
-
 binary_sensor:
   - platform: gpio
     pin:
@@ -113,8 +134,8 @@ binary_sensor:
     on_press:
       - http_request.post:
           url: "${server_url}/next"
-      - online_image.release: frame_image
-      - component.update: frame_image
+      - lambda: 'id(last_image_tag) = "";'  # force refresh after manual advance
+      - script.execute: check_and_refresh
 
 # configurable update interval — only poll when wifi is connected
 interval:
@@ -124,8 +145,7 @@ interval:
           condition:
             wifi.connected:
           then:
-            - online_image.release: frame_image
-            - component.update: frame_image
+            - script.execute: check_and_refresh
 
 display:
   - platform: epaper_spi
@@ -140,7 +160,7 @@ display:
       inverted: true   # BUSY is active-low on the Spectra6
     reset_pin: GPIO38
     rotation: 0°
-    # set to never due to online dependency; updates are triggered by the image download callback
+    # set to never — updates are triggered by the image download callback
     update_interval: never
     lambda: |-
       it.image(0, 0, id(frame_image));

@@ -50,15 +50,16 @@ CREDS_FILE       = os.environ.get("CREDS_FILE", "/app/service_account.json")
 DISPLAY_W, DISPLAY_H = 800, 480   # EE04 + 7.3" six-colour panel resolution
 
 # ── 6-colour e-ink palette ────────────────────────────────────────────────────
-# Matches the physical pigments on the Seeed 7.3" ACeP display:
-#   black, white, red, green, blue, yellow
+# Calibrated to the actual pigment colours of the Seeed 7.3" ACeP display.
+# Pure 255/0 values look desaturated on the physical panel — these values
+# are tuned to match what the display actually renders.
 EINK_PALETTE_RGB = [
     0,   0,   0,    # black
     255, 255, 255,  # white
-    255, 0,   0,    # red
-    0,   255, 0,    # green
-    0,   0,   255,  # blue
-    255, 255, 0,    # yellow
+    180,  40,  40,  # red   — physical pigment is darker/less saturated than 255,0,0
+    0,   140,  80,  # green — physical pigment skews teal
+    30,   60, 180,  # blue  — physical pigment skews indigo
+    200, 185,   0,  # yellow — physical pigment is slightly warm/dim
 ]
 # PIL palette buffer is always 256 colours × 3 channels
 _full_palette = EINK_PALETTE_RGB + [0] * (256 * 3 - len(EINK_PALETTE_RGB))
@@ -278,6 +279,17 @@ def serve_frame(index):
     if img is None:
         return "Image not ready yet", 503
     return Response(img, mimetype="image/png")
+
+
+@app.route("/frame/<int:index>/tag")
+def frame_tag(index):
+    """Lightweight tag endpoint — returns a short string identifying the current image.
+    ESPHome fetches this first and only downloads the full image if the tag changed."""
+    with pool_lock:
+        if not image_pool:
+            return "none", 503
+        idx = (int(time.time() / ROTATION_SECONDS) + manual_offset) % len(image_pool)
+    return f"{idx}:{last_top_id}", 200
 
 
 @app.route("/placeholder.png")
