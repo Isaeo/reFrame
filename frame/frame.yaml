@@ -22,7 +22,7 @@ substitutions:
   # setting for refresh time, Spectra6 takes ~30 s to update an image,
   # so fetching more often than that just wastes battery.
   # Format: Xs, Xmin, Xh  (e.g. "30min", "1h")
-  update_interval: "5min"
+  update_interval: "1min"
 
 
 esphome:

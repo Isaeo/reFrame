@@ -19,6 +19,8 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2 import service_account
 from PIL import Image
+import pillow_heif
+pillow_heif.register_heif_opener()  # adds HEIC/HEIF support to Pillow
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
